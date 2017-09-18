@@ -1,0 +1,12 @@
+
+C/C++ - Include
+$(OPENCV_DIR)\..\..\include
+
+Linker - lib
+$(OPENCV_DIR)\lib
+
+Linker - libs
+opencv_world330d.lib
+
+Linker - command 
+/FORCE:MULTIPLE
