@@ -41,7 +41,7 @@ int main(int argc, char **argv) {
   std::string input_file;
   std::string template_file;
   std::string output_file;
-  std::string reference_file;
+  std::string reference_file = "red_eye_effect.gold";
   double perPixelError = 0.0;
   double globalError   = 0.0;
   bool useEpsCheck = false;

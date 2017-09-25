@@ -19,8 +19,8 @@
     </ProjectConfiguration>
   </ItemGroup>
   <PropertyGroup Label="Globals">
-    <ProjectGuid>{997EDF34-F05A-46A1-9661-FE0A39BA9BE6}</ProjectGuid>
-    <RootNamespace>ProblemSet4</RootNamespace>
+    <ProjectGuid>{ACABCE12-C920-4ABC-838E-BA27D8A80671}</ProjectGuid>
+    <RootNamespace>SSIM</RootNamespace>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
@@ -163,28 +163,24 @@ copy "$(CudaToolkitBinDir)\cudart*.dll" "$(OutDir)"</Command>
     </CudaCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <CudaCompile Include="HW4.cu" />
     <CudaCompile Include="student_func.cu" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="compare.cpp" />
-    <ClCompile Include="loadSaveImage.cpp" />
-    <ClCompile Include="main.cpp" />
-    <ClCompile Include="reference_calc.cpp" />
+    <None Include="cinque_terre.gold" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="compare.h" />
-    <ClInclude Include="loadSaveImage.h" />
-    <ClInclude Include="reference_calc.h" />
+    <Image Include="cinque_terre_small.jpg" />
+    <Image Include="HW2_differenceImage.png" />
+    <Image Include="HW2_output.png" />
+    <Image Include="HW2_reference.png" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="HW2.cpp" />
+    <ClCompile Include="main.cpp" />
+  </ItemGroup>
+  <ItemGroup>
     <ClInclude Include="timer.h" />
     <ClInclude Include="utils.h" />
-  </ItemGroup>
-  <ItemGroup>
-    <None Include="red_eye_effect.gold" />
-  </ItemGroup>
-  <ItemGroup>
-    <Image Include="red_eye_effect_5.jpg" />
-    <Image Include="red_eye_effect_template_5.jpg" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
