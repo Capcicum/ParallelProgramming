@@ -13,6 +13,17 @@
 	v |= v >> 16;	\
 v++; \
 
+#define NUM_BANKS 16
+#define LOG_NUM_BANKS 4
+#ifdef ZERO_BANK_CONFLICTS
+#define CONFLICT_FREE_OFFSET(n) \
+	((n) >> NUM_BANKS + (n) >> (2 * LOG_NUM_BANKS))
+#else 
+#define CONFLICT_FREE_OFFSET(n) ((n) >> LOG_NUM_BANKS)
+#endif
+
+#define BLOCK_SIZE 512
+
 /* Red Eye Removal
    ===============
    
@@ -78,9 +89,7 @@ __global__ void bit_position(unsigned int *d_ones, unsigned int *d_zeros, const 
 	}
 }
 
-__global__
-void scan(const unsigned int* const d_in, unsigned int* const d_out,
-	unsigned int* const d_blockout, int n)
+__global__ void scan(const unsigned int* const d_in, unsigned int* const d_out, unsigned int* const d_blockout, int n)
 {
 	extern __shared__ unsigned int l_mod[];
 
@@ -121,6 +130,7 @@ void add(const unsigned int* const d_in, unsigned int* const d_out,
 
 void prefixSum(unsigned int* d_arr, unsigned int* d_out, int size)
 {
+
 	unsigned int* d_blockout;
 	int n = size;
 	makePow2(n);
@@ -131,8 +141,11 @@ void prefixSum(unsigned int* d_arr, unsigned int* d_out, int size)
 	blocks.z = min(blocks.z, 65535);
 	blocks.x = max(1, blocks.x);
 	checkCudaErrors(cudaMalloc(&d_blockout, sizeof(unsigned int)*blocks.x*blocks.y*blocks.z));
+
 	scan << <blocks, threads, threads * sizeof(unsigned int) >> >(d_arr, d_out, d_blockout, size);
+
 	cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+
 	if (blocks.x>1)
 	{
 		prefixSum(d_blockout, d_blockout, blocks.x*blocks.y*blocks.z);
@@ -143,50 +156,140 @@ void prefixSum(unsigned int* d_arr, unsigned int* d_out, int size)
 	cudaFree(d_blockout);
 }
 
-__global__ void prescan(unsigned int *d_output, unsigned int *d_input, int size)
+__global__ void prescan(unsigned int *d_output, unsigned int *d_input, int size, unsigned int *blockSums)
 {
-	//extern __shared__ int temp[];  // allocated on invocation
-	int thid = threadIdx.x + blockDim.x * blockIdx.x;
+	__shared__ float temp[BLOCK_SIZE * 2 + BLOCK_SIZE / 8];
+	int tid = threadIdx.x;
+
+	int start = (BLOCK_SIZE * 2) * blockIdx.x;
+
+	int aj, bj;
+	aj = tid;
+	bj = tid + BLOCK_SIZE;
+	int bankOffsetA = CONFLICT_FREE_OFFSET(aj);
+	int bankOffsetB = CONFLICT_FREE_OFFSET(bj);
+
+	if (size > start + aj)
+	{
+		temp[aj + bankOffsetA] = d_input[start + aj];
+	}
+	else
+	{
+		temp[aj + bankOffsetA] = 0.0;
+	}
+	if (size > start + bj)
+	{
+		temp[bj + bankOffsetB] = d_input[start + bj];
+	}
+	else
+	{
+		temp[bj + bankOffsetB] = 0.0;
+	}
+
 	int offset = 1;
-
-	if (thid > size / 2)
-		return;
-
-	d_output[2 * thid] = d_input[2 * thid]; // load input into shared memory
-	d_output[2 * thid + 1] = d_input[2 * thid + 1];
-
-	for (int d = size >> 1; d > 0; d >>= 1)                    // build sum in place up the tree
+	for (int d = BLOCK_SIZE; d>0; d >>= 1)
 	{
 		__syncthreads();
-		if (thid < d)
+		if (tid < d)
 		{
-			int ai = offset*(2 * thid + 1) - 1;
-			int bi = offset*(2 * thid + 2) - 1;
-			d_output[bi] += d_output[ai];
+			int ai = offset * (2 * tid + 1) - 1;
+			int bi = offset * (2 * tid + 2) - 1;
+			ai += CONFLICT_FREE_OFFSET(ai);
+			bi += CONFLICT_FREE_OFFSET(bi);
+
+
+			temp[bi] += temp[ai];
 		}
 		offset *= 2;
 	}
+	if (tid == 0)
+	{
+		temp[BLOCK_SIZE * 2 - 1 + CONFLICT_FREE_OFFSET(BLOCK_SIZE * 2 - 1)] = 0;
+	}
 
-	if (thid == 0) { d_output[size - 1] = 0; } // clear the last element
-
-	for (int d = 1; d < size; d *= 2) // traverse down tree & build scan
+	for (int d = 1; d < BLOCK_SIZE * 2; d *= 2)
 	{
 		offset >>= 1;
 		__syncthreads();
-		if (thid < d)
+		if (tid < d)
 		{
-			int ai = offset*(2 * thid + 1) - 1;
-			int bi = offset*(2 * thid + 2) - 1;
-			int t = d_output[ai];
-			d_output[ai] = d_output[bi];
-			d_output[bi] += t;
+			int ai = offset * (2 * tid + 1) - 1;
+			int bi = offset * (2 * tid + 2) - 1;
+			ai += CONFLICT_FREE_OFFSET(ai);
+			bi += CONFLICT_FREE_OFFSET(bi);
+
+			float t = temp[ai];
+			temp[ai] = temp[bi];
+			temp[bi] += t;
 		}
 	}
 	__syncthreads();
-	d_output[2 * thid] = d_output[2 * thid]; // write results to device memory
-	d_output[2 * thid + 1] = d_output[2 * thid + 1];
+
+
+	if (size > start + aj)
+	{
+		d_output[start + aj] = temp[aj + bankOffsetA];
+	}
+	else
+	{
+		d_output[start + aj] = 0;
+	}
+	if (size > start + bj)
+	{
+		d_output[start + bj] = temp[bj + bankOffsetB];
+	}
+	else
+	{
+		d_output[start + bj] = 0;
+	}
+
+	if (tid == 0)
+		blockSums[blockIdx.x] = temp[2 * BLOCK_SIZE - 1] + d_input[start + 2 * BLOCK_SIZE - 1];
 
 }
+
+__global__ void bellochAdd(unsigned int* d_input, unsigned int* d_incrementor, int size)
+{
+	unsigned int thid = threadIdx.x + blockDim.x * blockIdx.x;
+
+	d_input[thid] += d_incrementor[blockIdx.x];
+
+}
+
+void bellochScan(unsigned int *d_output, unsigned int *d_input, unsigned int size)
+{
+	//	printf("starting helper index %d\n", index);
+	unsigned int threads = 1024;
+	unsigned int blocks = ceil((float)(size / (float)(BLOCK_SIZE * 2)));
+	if (size / threads < 1)
+	{
+		blocks = 1;
+		threads = size;
+	}
+	if (blocks > BLOCK_SIZE * 2)
+	{
+		printf("Too big!");
+		return;
+	}
+
+	unsigned int *blockssum;
+	unsigned int *blocksSummed;
+	unsigned int *blocksum1;
+	checkCudaErrors(cudaMalloc(&blockssum, sizeof(unsigned int)*blocks));
+	checkCudaErrors(cudaMalloc(&blocksSummed, sizeof(unsigned int)*blocks));
+	checkCudaErrors(cudaMalloc(&blocksum1, sizeof(unsigned int)));
+
+
+	prescan << <blocks, threads >> >(d_output, d_input, size, blockssum);
+
+	if (blocks > 1)
+	{
+		prescan << <1, blocks >> >(blocksSummed, blockssum, blocks, blocksum1);
+		bellochAdd << <blocks, threads >> >(d_output, blocksSummed, size);
+
+	}
+}
+
 __global__ void sort(unsigned int* const d_inputVals, unsigned int* const d_inputPos,
 	unsigned int* const d_outputVals, unsigned int* const d_outputPos,
 	unsigned int* d_ones_scanned, unsigned int* d_zeros_scanned,
@@ -243,7 +346,7 @@ void your_sort(unsigned int* const d_inputVals,
 	unsigned int *d_ones_scanned;
 	unsigned int *d_zeros_scanned;
 
-	/*unsigned int *h_hist;
+	unsigned int *h_hist;
 	unsigned int *h_scan;
 	unsigned int *h_zeros;
 	unsigned int *h_ones;
@@ -265,7 +368,7 @@ void your_sort(unsigned int* const d_inputVals,
 	h_zeros = (unsigned int*)malloc(sizeof(unsigned int)*numElems);
 	h_ones = (unsigned int*)malloc(sizeof(unsigned int)*numElems);
 	h_ones_scanned = (unsigned int*)malloc(sizeof(unsigned int)*numElems);
-	h_zeros_scanned = (unsigned int*)malloc(sizeof(unsigned int)*numElems);*/
+	h_zeros_scanned = (unsigned int*)malloc(sizeof(unsigned int)*numElems);
 
 
 	checkCudaErrors(cudaMalloc(&d_bins, sizeof(unsigned int)*numOfBins));
@@ -275,7 +378,7 @@ void your_sort(unsigned int* const d_inputVals,
 	checkCudaErrors(cudaMalloc(&d_ones_scanned, sizeof(unsigned int)*numElems));
 	checkCudaErrors(cudaMalloc(&d_zeros_scanned, sizeof(unsigned int)*numElems));
 
-	/*cudaMemcpy(h_inputVals, d_inputVals, numElems * sizeof(unsigned int), cudaMemcpyDeviceToHost);
+	cudaMemcpy(h_inputVals, d_inputVals, numElems * sizeof(unsigned int), cudaMemcpyDeviceToHost);
 
 	unsigned int *binHistogram = new unsigned int[numOfBins];
 	unsigned int *binScan = new unsigned int[numOfBins];
@@ -289,7 +392,7 @@ void your_sort(unsigned int* const d_inputVals,
 	unsigned int *pos_dst = new unsigned int[numElems];
 
 	memset(ones_scanned, 0, sizeof(unsigned int) * numElems);
-	memset(zeros_scanned, 0, sizeof(unsigned int) * numElems);*/
+	memset(zeros_scanned, 0, sizeof(unsigned int) * numElems);
 
 	for (int i = 0; i < 8 * (int)sizeof(unsigned int); i++)
 	{
@@ -297,14 +400,14 @@ void your_sort(unsigned int* const d_inputVals,
 		checkCudaErrors(cudaMemset(d_bins, 0, sizeof(unsigned int) * numOfBins));
 		checkCudaErrors(cudaMemset(d_scan, 0, sizeof(unsigned int) * numOfBins));
 
-		/*memset(binHistogram, 0, sizeof(unsigned int) * numOfBins);
-		memset(binScan, 0, sizeof(unsigned int) * numOfBins);*/
+		memset(binHistogram, 0, sizeof(unsigned int) * numOfBins);
+		memset(binScan, 0, sizeof(unsigned int) * numOfBins);
 
 		simple_histo << <blocks, threads>> > (d_bins, d_inputVals, i, numElems);
 
 		cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 
-		/*cudaMemcpy(h_hist, d_bins, numOfBins * sizeof(unsigned int), cudaMemcpyDeviceToHost);
+		cudaMemcpy(h_hist, d_bins, numOfBins * sizeof(unsigned int), cudaMemcpyDeviceToHost);
 
 		for (unsigned int j = 0; j < numElems; ++j) {
 			unsigned int bin = (h_inputVals[j] >> i) & 1;
@@ -318,13 +421,13 @@ void your_sort(unsigned int* const d_inputVals,
 				printf("Histogram error at pos %d should be: %d is: %d", j, binHistogram[j], h_hist[j]);
 				return;
 			}
-		}*/
+		}
 
-		prescan << <1, 1>> >(d_scan, d_bins, numOfBins);
+		bellochScan(d_scan, d_bins, numOfBins);
 
 		cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 
-		/*cudaMemcpy(h_scan, d_scan, numOfBins * sizeof(unsigned int), cudaMemcpyDeviceToHost);
+		cudaMemcpy(h_scan, d_scan, numOfBins * sizeof(unsigned int), cudaMemcpyDeviceToHost);
 
 		for (unsigned int j = 1; j < numOfBins; ++j) {
 			binScan[j] = binScan[j - 1] + binHistogram[j - 1];
@@ -338,12 +441,12 @@ void your_sort(unsigned int* const d_inputVals,
 				return;
 			}
 		}
-		*/
+		
 		bit_position << < blocks, threads >> > (d_ones, d_zeros, d_inputVals, i, numElems);
 
 		cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 
-		/*cudaMemcpy(h_ones, d_ones, numElems * sizeof(unsigned int), cudaMemcpyDeviceToHost);
+		cudaMemcpy(h_ones, d_ones, numElems * sizeof(unsigned int), cudaMemcpyDeviceToHost);
 		cudaMemcpy(h_zeros, d_zeros, numElems * sizeof(unsigned int), cudaMemcpyDeviceToHost);
 
 		for (unsigned int j = 0; j < numElems; j++)
@@ -372,13 +475,13 @@ void your_sort(unsigned int* const d_inputVals,
 				printf("Bit position zeros error at pos %d should be: %d is: %d", j, zeros[j], h_zeros[j]);
 				return;
 			}
-		}*/
+		}
 
-		prefixSum(d_ones, d_ones_scanned, numElems);
+		bellochScan(d_ones_scanned, d_ones, numElems);
 
 		cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 
-		/*cudaMemcpy(h_ones_scanned, d_ones_scanned, numElems * sizeof(unsigned int), cudaMemcpyDeviceToHost);
+		cudaMemcpy(h_ones_scanned, d_ones_scanned, numElems * sizeof(unsigned int), cudaMemcpyDeviceToHost);
 
 		for (unsigned int j = 1; j < numOfBins; ++j) {
 			ones_scanned[j] = ones_scanned[j - 1] + ones[j - 1];
@@ -391,7 +494,7 @@ void your_sort(unsigned int* const d_inputVals,
 				printf("Histogram Scan error at pos %d should be: %d is: %d", j, ones_scanned[j], h_ones_scanned[j]);
 				return;
 			}
-		}*/
+		}
 
 		prefixSum(d_zeros, d_zeros_scanned, numElems);
 
